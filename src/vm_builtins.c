@@ -13821,9 +13821,38 @@ static RValue builtin_color_get_value(MAYBE_UNUSED VMContext* ctx, RValue* args,
     return RValue_makeReal(v);
 }
 
-// Display stubs
+// Display size
+#ifdef PLATFORM_SWITCH
+// On Switch the window always covers the whole screen (1280x720 handheld,
+// 1920x1080 docked), so the window size is the display size. Games that
+// center their own fullscreen image (AM2R) need the real value here.
+static RValue builtin_display_get_width(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    if (runner != nullptr && runner->getWindowSize != nullptr) {
+        int32_t w = 0;
+        int32_t h = 0;
+        if (runner->getWindowSize(&w, &h)) {
+            return RValue_makeReal((GMLReal) w);
+        }
+    }
+    return RValue_makeReal(1280.0);
+}
+
+static RValue builtin_display_get_height(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    if (runner != nullptr && runner->getWindowSize != nullptr) {
+        int32_t w = 0;
+        int32_t h = 0;
+        if (runner->getWindowSize(&w, &h)) {
+            return RValue_makeReal((GMLReal) h);
+        }
+    }
+    return RValue_makeReal(720.0);
+}
+#else
 STUB_RETURN_VALUE(display_get_width, 640.0)
 STUB_RETURN_VALUE(display_get_height, 480.0)
+#endif
 
 static int32_t resolveGuiWidth(Runner* runner) {
     if (runner->guiWidth > 0) return runner->guiWidth;

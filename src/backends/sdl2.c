@@ -242,7 +242,9 @@ bool platformInit(int reqW, int reqH, const char *title, bool headless, bool ful
         return false;
     }
     if (gfx != SOFTWARE) {
-#ifndef PLATFORM_VITA
+#if defined(PLATFORM_SWITCH)
+        SDL_GL_SetSwapInterval(1); // vsync on: without it the Switch shows torn, flickering frames
+#elif !defined(PLATFORM_VITA)
         SDL_GL_SetSwapInterval(0); // disable vsync
 #endif
     } else {
