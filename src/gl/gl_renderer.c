@@ -1313,10 +1313,23 @@ static bool resolveSpriteTexture(GLRenderer* gl, int32_t tpagIndex, TexturePageI
     int16_t pageId = tpag->texturePageId;
     if (0 > pageId || gl->textureCount <= (uint32_t) pageId) return false;
     if (!GLRenderer_ensureTextureLoaded(gl, (uint32_t) pageId)) return false;
+
+    // Some data.win TPAGs (e.g. empty 2x2 sprites packed in the last column of a page) have a source rect that runs
+    // past the texture page edge. Texture pages repeat, so those UVs would wrap around and sample the opposite edge
+    // of the page (AM2R's sBlank picked up a dark pixel this way). Keep the source rect inside the page.
+    int32_t pageW = gl->textureWidths[pageId];
+    int32_t pageH = gl->textureHeights[pageId];
+    if (pageW > 0 && tpag->sourceX < pageW && tpag->sourceX + tpag->sourceWidth > pageW) {
+        tpag->sourceWidth = (uint16_t) (pageW - tpag->sourceX);
+    }
+    if (pageH > 0 && tpag->sourceY < pageH && tpag->sourceY + tpag->sourceHeight > pageH) {
+        tpag->sourceHeight = (uint16_t) (pageH - tpag->sourceY);
+    }
+
     *outTpag = tpag;
     *outTexId = gl->glTextures[pageId];
-    *outTexW = gl->textureWidths[pageId];
-    *outTexH = gl->textureHeights[pageId];
+    *outTexW = pageW;
+    *outTexH = pageH;
     return true;
 }
 
@@ -3054,6 +3067,167 @@ static int32_t glCreateSpriteFromSurface(Renderer* renderer, int32_t surfaceID, 
     return (int32_t) spriteIndex;
 }
 
+// ===[ Runtime sprites from image files (sprite_add, sprite_replace, background_add, ...) ]===
+
+// True if any live sprite other than exceptSprite, or any background, references this TPAG.
+static bool isTpagUsedElsewhere(DataWin* dw, int32_t tpagIdx, int32_t exceptSprite) {
+    for (uint32_t si = 0; dw->sprt.count > si; si++) {
+        if ((int32_t) si == exceptSprite) continue;
+        Sprite* other = &dw->sprt.sprites[si];
+        repeat(other->textureCount, f) {
+            if (other->tpagIndices[f] == tpagIdx) return true;
+        }
+    }
+    for (uint32_t bi = 0; dw->bgnd.count > bi; bi++) {
+        if (dw->bgnd.backgrounds[bi].tpagIndex == tpagIdx) return true;
+    }
+    return false;
+}
+
+// True if any dynamic TPAG still points at this texture page (several frames of one strip share a page).
+static bool isTexturePageUsed(DataWin* dw, uint32_t originalTpagCount, int16_t pageId) {
+    for (uint32_t i = originalTpagCount; dw->tpag.count > i; i++) {
+        if (dw->tpag.items[i].texturePageId == pageId) return true;
+    }
+    return false;
+}
+
+// Uploads an RGBA image as one texture page and creates one TPAG per frame (a horizontal strip, like
+// GameMaker's sprite_add). Writes the TPAG indices to outTpagIndices (frames entries).
+static bool glUploadImageFrames(Renderer* renderer, const uint8_t* rgba, int32_t w, int32_t h, int32_t frames, int32_t* outTpagIndices) {
+    GLRenderer* gl = (GLRenderer*) renderer;
+    DataWin* dw = renderer->dataWin;
+
+    if (rgba == nullptr || 0 >= w || 0 >= h || 0 >= frames) return false;
+    int32_t frameW = w / frames;
+    if (0 >= frameW) return false;
+
+    flushBatch(gl);
+
+    GLuint newTexId;
+    glGenTextures(1, &newTexId);
+    glBindTexture(GL_TEXTURE_2D, newTexId);
+    glTexImage2D(GL_TEXTURE_2D, 0, gl->textureFormat, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    GLCommon_applyTexFilter(renderer->texFilter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    uint32_t pageId = findOrAllocTexturePageSlot(gl);
+    gl->glTextures[pageId] = newTexId;
+    gl->textureWidths[pageId] = w;
+    gl->textureHeights[pageId] = h;
+    gl->textureLoaded[pageId] = true;
+
+    repeat(frames, f) {
+        uint32_t tpagIndex = findOrAllocTpagSlot(dw, gl->originalTpagCount);
+        TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
+        tpag->sourceX = (uint16_t) (f * frameW);
+        tpag->sourceY = 0;
+        tpag->sourceWidth = (uint16_t) frameW;
+        tpag->sourceHeight = (uint16_t) h;
+        tpag->targetX = 0;
+        tpag->targetY = 0;
+        tpag->targetWidth = (uint16_t) frameW;
+        tpag->targetHeight = (uint16_t) h;
+        tpag->boundingWidth = (uint16_t) frameW;
+        tpag->boundingHeight = (uint16_t) h;
+        tpag->texturePageId = (int16_t) pageId;
+        outTpagIndices[f] = (int32_t) tpagIndex;
+    }
+    return true;
+}
+
+static void setSpriteFramesNoMask(Sprite* sprite, int32_t frameW, int32_t h, int32_t frames, int32_t* tpagIndices, int32_t xorig, int32_t yorig) {
+    sprite->width = (uint32_t) frameW;
+    sprite->height = (uint32_t) h;
+    sprite->originX = xorig;
+    sprite->originY = yorig;
+    sprite->marginLeft = 0;
+    sprite->marginTop = 0;
+    sprite->marginRight = frameW - 1;
+    sprite->marginBottom = h - 1;
+    sprite->textureCount = (uint32_t) frames;
+    sprite->tpagIndices = tpagIndices;
+    sprite->maskCount = 0;
+    sprite->masks = nullptr;
+    sprite->maskWidth = 0;
+    sprite->maskHeight = 0;
+    sprite->maskOffsetX = 0;
+    sprite->maskOffsetY = 0;
+}
+
+static int32_t glCreateSpriteFromPixels(Renderer* renderer, const uint8_t* rgba, int32_t w, int32_t h, int32_t frames, int32_t xorig, int32_t yorig) {
+    GLRenderer* gl = (GLRenderer*) renderer;
+    DataWin* dw = renderer->dataWin;
+
+    if (0 >= frames) frames = 1;
+    int32_t* tpags = (int32_t *)safeMalloc((size_t) frames * sizeof(int32_t));
+    if (!glUploadImageFrames(renderer, rgba, w, h, frames, tpags)) {
+        free(tpags);
+        return -1;
+    }
+
+    uint32_t spriteIndex = DataWin_allocSpriteSlot(dw, gl->originalSpriteCount);
+    Sprite* sprite = &dw->sprt.sprites[spriteIndex];
+    setSpriteFramesNoMask(sprite, w / frames, h, frames, tpags, xorig, yorig);
+    return (int32_t) spriteIndex;
+}
+
+// sprite_duplicate: a new sprite sharing the source's frames (TPAGs are shared; deletion is reference-safe).
+static int32_t glDuplicateSprite(Renderer* renderer, int32_t srcIndex) {
+    GLRenderer* gl = (GLRenderer*) renderer;
+    DataWin* dw = renderer->dataWin;
+    if (0 > srcIndex || dw->sprt.count <= (uint32_t) srcIndex) return -1;
+    if (dw->sprt.sprites[srcIndex].textureCount == 0) return -1;
+
+    uint32_t newIndex = DataWin_allocSpriteSlot(dw, gl->originalSpriteCount);
+    // allocSpriteSlot may have moved the array, so take pointers afterwards.
+    Sprite* src = &dw->sprt.sprites[srcIndex];
+    Sprite* dst = &dw->sprt.sprites[newIndex];
+    const char* keepName = dst->name;
+    *dst = *src;
+    dst->name = keepName;
+    dst->tpagIndices = (int32_t *)safeMalloc(src->textureCount * sizeof(int32_t));
+    memcpy(dst->tpagIndices, src->tpagIndices, src->textureCount * sizeof(int32_t));
+    return (int32_t) newIndex;
+}
+
+// sprite_assign (append == false): dst becomes a copy of src.
+// sprite_merge (append == true): src's frames are added after dst's frames.
+static bool glCopySpriteInto(Renderer* renderer, int32_t dstIndex, int32_t srcIndex, bool append) {
+    DataWin* dw = renderer->dataWin;
+    if (0 > srcIndex || dw->sprt.count <= (uint32_t) srcIndex) return false;
+    if (0 > dstIndex || dw->sprt.count <= (uint32_t) dstIndex) return false;
+    if (srcIndex == dstIndex) return true;
+    Sprite* src = &dw->sprt.sprites[srcIndex];
+    Sprite* dst = &dw->sprt.sprites[dstIndex];
+    if (src->textureCount == 0) return false;
+
+    if (append && dst->textureCount > 0) {
+        uint32_t total = dst->textureCount + src->textureCount;
+        int32_t* merged = (int32_t *)safeMalloc(total * sizeof(int32_t));
+        memcpy(merged, dst->tpagIndices, dst->textureCount * sizeof(int32_t));
+        memcpy(merged + dst->textureCount, src->tpagIndices, src->textureCount * sizeof(int32_t));
+        // Old index arrays of data.win sprites are not separately owned, so only free dynamic ones.
+        if (((GLRenderer*) renderer)->originalSpriteCount <= (uint32_t) dstIndex) free(dst->tpagIndices);
+        dst->tpagIndices = merged;
+        dst->textureCount = total;
+        // Merged frames can't share per-frame collision masks reliably; fall back to bounding boxes.
+        dst->maskCount = 0;
+        dst->masks = nullptr;
+        return true;
+    }
+
+    int32_t* indices = (int32_t *)safeMalloc(src->textureCount * sizeof(int32_t));
+    memcpy(indices, src->tpagIndices, src->textureCount * sizeof(int32_t));
+    if (((GLRenderer*) renderer)->originalSpriteCount <= (uint32_t) dstIndex) free(dst->tpagIndices);
+    const char* keepName = dst->name;
+    *dst = *src;
+    dst->name = keepName;
+    dst->tpagIndices = indices;
+    return true;
+}
+
 static void glDeleteSprite(Renderer* renderer, int32_t spriteIndex) {
     GLRenderer* gl = (GLRenderer*) renderer;
     DataWin* dw = renderer->dataWin;
@@ -3070,18 +3244,20 @@ static void glDeleteSprite(Renderer* renderer, int32_t spriteIndex) {
     if (sprite->textureCount == 0) return; // already deleted
 
     // Clean up GL texture and TPAG entries owned by this sprite.
-    // Slots with index >= originalTpagCount are dynamically allocated and ours to free.
+    // Slots with index >= originalTpagCount are dynamically allocated and ours to free, unless another sprite
+    // or background still uses them (sprite_duplicate/sprite_assign/sprite_merge/background_assign share them).
     repeat(sprite->textureCount, i) {
         int32_t tpagIdx = sprite->tpagIndices[i];
         if (tpagIdx >= 0 && (uint32_t) tpagIdx >= gl->originalTpagCount) {
+            if (isTpagUsedElsewhere(dw, tpagIdx, spriteIndex)) continue;
             TexturePageItem* tpag = &dw->tpag.items[tpagIdx];
             int16_t pageId = tpag->texturePageId;
-            if (pageId >= 0 && gl->textureCount > (uint32_t) pageId) {
+            // Mark TPAG slot as free for reuse
+            tpag->texturePageId = -1;
+            if (pageId >= 0 && gl->textureCount > (uint32_t) pageId && !isTexturePageUsed(dw, gl->originalTpagCount, pageId)) {
                 glDeleteTextures(1, &gl->glTextures[pageId]);
                 gl->glTextures[pageId] = 0;
             }
-            // Mark TPAG slot as free for reuse
-            tpag->texturePageId = -1;
         }
     }
 
@@ -3543,6 +3719,10 @@ Renderer* GLRenderer_create(void) {
     glVtable.clearScreen = glClearScreen;
     glVtable.createSpriteFromSurface = glCreateSpriteFromSurface;
     glVtable.deleteSprite = glDeleteSprite;
+    glVtable.uploadImageFrames = glUploadImageFrames;
+    glVtable.createSpriteFromPixels = glCreateSpriteFromPixels;
+    glVtable.duplicateSprite = glDuplicateSprite;
+    glVtable.copySpriteInto = glCopySpriteInto;
     glVtable.gpuGetBlendFactors = glGpuGetBlendFactors;
     glVtable.gpuGetBlendMode = glGpuGetBlendMode;
     glVtable.gpuSetBlendMode = glGpuSetBlendMode;

@@ -170,6 +170,11 @@ typedef struct {
     void (*clearScreen)(Renderer* renderer, uint32_t color, float alpha);
     int32_t (*createSpriteFromSurface)(Renderer* renderer, int32_t surfaceID, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
     void (*deleteSprite)(Renderer* renderer, int32_t spriteIndex);
+    // Runtime sprites from decoded RGBA images (sprite_add, sprite_replace, background_add). Optional; may be null.
+    bool (*uploadImageFrames)(Renderer* renderer, const uint8_t* rgba, int32_t w, int32_t h, int32_t frames, int32_t* outTpagIndices);
+    int32_t (*createSpriteFromPixels)(Renderer* renderer, const uint8_t* rgba, int32_t w, int32_t h, int32_t frames, int32_t xorig, int32_t yorig);
+    int32_t (*duplicateSprite)(Renderer* renderer, int32_t spriteIndex);
+    bool (*copySpriteInto)(Renderer* renderer, int32_t dstIndex, int32_t srcIndex, bool append);
     BlendFactors (*gpuGetBlendFactors)(Renderer* renderer);
     int32_t (*gpuGetBlendMode)(Renderer* renderer);
     void (*gpuSetBlendMode)(Renderer* renderer, int32_t mode);

@@ -34,6 +34,7 @@
 #include "audio_system.h"
 #include "fmod/fmod.h"
 #include "file_system.h"
+#include "image_decoder.h"
 #include "md5.h"
 #include "sha1.h"
 #include "base64.h"
@@ -13452,10 +13453,209 @@ static RValue builtin_surface_get_texture(VMContext* ctx, RValue* args, MAYBE_UN
 }
 
 // Sprite functions
-static RValue builtin_sprite_add(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
-    logStubbedFunction(ctx, "sprite_add");
-    // Return 1, so that a sprite_exists check passes
-    return RValue_makeInt32(1);
+// ===[ Sprites and backgrounds loaded from image files ]===
+// Used by games that load or swap art at runtime (AM2R loads its palettes and multiplayer icons from mods/).
+
+static uint32_t originalBackgroundCount = 0;
+
+// Reads and decodes a PNG through the game's file system. Returns malloc'd RGBA pixels, or nullptr.
+static uint8_t* loadImageRgba(VMContext* ctx, RValue pathValue, bool removeback, int32_t* outW, int32_t* outH) {
+    if (pathValue.type != RVALUE_STRING || pathValue.string == nullptr) return nullptr;
+    FileSystem* fs = ctx->runner->fileSystem;
+    if (fs == nullptr || fs->vtable->readFileBinary == nullptr) return nullptr;
+
+    uint8_t* blob = nullptr;
+    int32_t blobSize = 0;
+    if (!fs->vtable->readFileBinary(fs, pathValue.string, &blob, &blobSize) || blob == nullptr || 0 >= blobSize) {
+        free(blob);
+        return nullptr;
+    }
+
+    int w = 0;
+    int h = 0;
+    uint8_t* rgba = ImageDecoder_decodeToRgba(blob, (size_t) blobSize, false, &w, &h);
+    free(blob);
+    if (rgba == nullptr || 0 >= w || 0 >= h) {
+        free(rgba);
+        return nullptr;
+    }
+
+    // GameMaker's "removeback": the bottom-left pixel's color becomes transparent everywhere.
+    if (removeback) {
+        const uint8_t* key = rgba + ((size_t) (h - 1) * (size_t) w) * 4;
+        uint8_t kr = key[0];
+        uint8_t kg = key[1];
+        uint8_t kb = key[2];
+        size_t pixelCount = (size_t) w * (size_t) h;
+        for (size_t i = 0; pixelCount > i; i++) {
+            uint8_t* px = rgba + i * 4;
+            if (px[0] == kr && px[1] == kg && px[2] == kb) px[3] = 0;
+        }
+    }
+
+    *outW = w;
+    *outH = h;
+    return rgba;
+}
+
+static bool rendererSupportsImageSprites(Renderer* renderer) {
+    return renderer != nullptr
+        && renderer->vtable->uploadImageFrames != nullptr
+        && renderer->vtable->createSpriteFromPixels != nullptr
+        && renderer->vtable->duplicateSprite != nullptr
+        && renderer->vtable->copySpriteInto != nullptr;
+}
+
+// sprite_add(fname, imgnum, removeback, smooth, xorig, yorig)
+static RValue builtin_sprite_add(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("sprite_add", 1, RValue_makeReal(-1.0));
+    Renderer* renderer = ctx->runner->renderer;
+    if (!rendererSupportsImageSprites(renderer)) {
+        logStubbedFunction(ctx, "sprite_add");
+        return RValue_makeReal(-1.0);
+    }
+
+    int32_t frames = argCount > 1 ? RValue_toInt32(args[1]) : 1;
+    bool removeback = argCount > 2 ? RValue_toBool(args[2]) : false;
+    int32_t xorig = argCount > 4 ? RValue_toInt32(args[4]) : 0;
+    int32_t yorig = argCount > 5 ? RValue_toInt32(args[5]) : 0;
+
+    int32_t w = 0;
+    int32_t h = 0;
+    uint8_t* rgba = loadImageRgba(ctx, args[0], removeback, &w, &h);
+    if (rgba == nullptr) return RValue_makeReal(-1.0);
+
+    int32_t spriteIndex = renderer->vtable->createSpriteFromPixels(renderer, rgba, w, h, frames, xorig, yorig);
+    free(rgba);
+    return RValue_makeReal((GMLReal) spriteIndex);
+}
+
+// sprite_replace(ind, fname, imgnum, removeback, smooth, xorig, yorig)
+static RValue builtin_sprite_replace(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("sprite_replace", 2, RValue_makeBool(false));
+    Renderer* renderer = ctx->runner->renderer;
+    if (!rendererSupportsImageSprites(renderer)) {
+        logStubbedFunction(ctx, "sprite_replace");
+        return RValue_makeBool(false);
+    }
+
+    int32_t target = RValue_toInt32(args[0]);
+    if (0 > target || ctx->dataWin->sprt.count <= (uint32_t) target) return RValue_makeBool(false);
+
+    int32_t frames = argCount > 2 ? RValue_toInt32(args[2]) : 1;
+    bool removeback = argCount > 3 ? RValue_toBool(args[3]) : false;
+    int32_t xorig = argCount > 5 ? RValue_toInt32(args[5]) : 0;
+    int32_t yorig = argCount > 6 ? RValue_toInt32(args[6]) : 0;
+
+    int32_t w = 0;
+    int32_t h = 0;
+    uint8_t* rgba = loadImageRgba(ctx, args[1], removeback, &w, &h);
+    if (rgba == nullptr) return RValue_makeBool(false);
+
+    int32_t temp = renderer->vtable->createSpriteFromPixels(renderer, rgba, w, h, frames, xorig, yorig);
+    free(rgba);
+    if (0 > temp) return RValue_makeBool(false);
+
+    bool ok = renderer->vtable->copySpriteInto(renderer, target, temp, false);
+    // The target now shares the new frames, so deleting the temporary sprite keeps them alive.
+    if (renderer->vtable->deleteSprite != nullptr) renderer->vtable->deleteSprite(renderer, temp);
+    return RValue_makeBool(ok);
+}
+
+// sprite_duplicate(ind)
+static RValue builtin_sprite_duplicate(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("sprite_duplicate", 1, RValue_makeReal(-1.0));
+    Renderer* renderer = ctx->runner->renderer;
+    if (!rendererSupportsImageSprites(renderer)) {
+        logStubbedFunction(ctx, "sprite_duplicate");
+        return RValue_makeReal(-1.0);
+    }
+    return RValue_makeReal((GMLReal) renderer->vtable->duplicateSprite(renderer, RValue_toInt32(args[0])));
+}
+
+// sprite_merge(ind1, ind2): appends ind2's frames to ind1
+static RValue builtin_sprite_merge(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("sprite_merge", 2, RValue_makeUndefined());
+    Renderer* renderer = ctx->runner->renderer;
+    if (!rendererSupportsImageSprites(renderer)) {
+        logStubbedFunction(ctx, "sprite_merge");
+        return RValue_makeUndefined();
+    }
+    renderer->vtable->copySpriteInto(renderer, RValue_toInt32(args[0]), RValue_toInt32(args[1]), true);
+    return RValue_makeUndefined();
+}
+
+// sprite_assign(ind, spr): ind becomes a copy of spr
+static RValue builtin_sprite_assign(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("sprite_assign", 2, RValue_makeUndefined());
+    Renderer* renderer = ctx->runner->renderer;
+    if (!rendererSupportsImageSprites(renderer)) {
+        logStubbedFunction(ctx, "sprite_assign");
+        return RValue_makeUndefined();
+    }
+    renderer->vtable->copySpriteInto(renderer, RValue_toInt32(args[0]), RValue_toInt32(args[1]), false);
+    return RValue_makeUndefined();
+}
+
+// background_add(fname, removeback, smooth) (GMS 1.x)
+static RValue builtin_background_add(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("background_add", 1, RValue_makeReal(-1.0));
+    Renderer* renderer = ctx->runner->renderer;
+    if (!rendererSupportsImageSprites(renderer)) {
+        logStubbedFunction(ctx, "background_add");
+        return RValue_makeReal(-1.0);
+    }
+
+    bool removeback = argCount > 1 ? RValue_toBool(args[1]) : false;
+    int32_t w = 0;
+    int32_t h = 0;
+    uint8_t* rgba = loadImageRgba(ctx, args[0], removeback, &w, &h);
+    if (rgba == nullptr) return RValue_makeReal(-1.0);
+
+    int32_t tpagIndex = -1;
+    bool ok = renderer->vtable->uploadImageFrames(renderer, rgba, w, h, 1, &tpagIndex);
+    free(rgba);
+    if (!ok) return RValue_makeReal(-1.0);
+
+    DataWin* dw = ctx->dataWin;
+    uint32_t newIndex = dw->bgnd.count;
+    dw->bgnd.count++;
+    dw->bgnd.backgrounds = (Background *)safeRealloc(dw->bgnd.backgrounds, dw->bgnd.count * sizeof(Background));
+    Background* bg = &dw->bgnd.backgrounds[newIndex];
+    memset(bg, 0, sizeof(Background));
+    char name[40];
+    snprintf(name, sizeof(name), "__newbackground%u", newIndex);
+    bg->name = safeStrdup(name);
+    bg->present = true;
+    bg->transparent = removeback;
+    bg->tpagIndex = tpagIndex;
+    return RValue_makeReal((GMLReal) newIndex);
+}
+
+// background_assign(ind, back): ind now shows back's image
+static RValue builtin_background_assign(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("background_assign", 2, RValue_makeUndefined());
+    DataWin* dw = ctx->dataWin;
+    int32_t dst = RValue_toInt32(args[0]);
+    int32_t src = RValue_toInt32(args[1]);
+    if (0 > dst || dw->bgnd.count <= (uint32_t) dst) return RValue_makeUndefined();
+    if (0 > src || dw->bgnd.count <= (uint32_t) src) return RValue_makeUndefined();
+    if (0 > dw->bgnd.backgrounds[src].tpagIndex) return RValue_makeUndefined();
+    dw->bgnd.backgrounds[dst].tpagIndex = dw->bgnd.backgrounds[src].tpagIndex;
+    return RValue_makeUndefined();
+}
+
+// background_delete(ind) (GMS 1.x): only backgrounds created at runtime can be deleted. Their image may still be
+// shown by a background it was assigned to, so the texture is kept.
+static RValue builtin_background_delete_gms1(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("background_delete", 1, RValue_makeUndefined());
+    DataWin* dw = ctx->dataWin;
+    int32_t index = RValue_toInt32(args[0]);
+    if (0 > index || dw->bgnd.count <= (uint32_t) index) return RValue_makeUndefined();
+    if (originalBackgroundCount > (uint32_t) index) return RValue_makeUndefined();
+    dw->bgnd.backgrounds[index].tpagIndex = -1;
+    dw->bgnd.backgrounds[index].present = false;
+    return RValue_makeUndefined();
 }
 
 static RValue builtin_sprite_exists(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
@@ -24462,6 +24662,7 @@ static RValue builtin_physics_raycast(VMContext* ctx, RValue* args, int32_t coun
 // ===[ REGISTRATION ]===
 
 void VMBuiltins_registerAll(VMContext* ctx) {
+    originalBackgroundCount = ctx->dataWin->bgnd.count;
     requireMessage(!ctx->registeredBuiltinFunctions, "Attempting to register all VMBuiltins, but it was already registered!");
     ctx->registeredBuiltinFunctions = true;
 #ifdef ENABLE_FMOD
@@ -25376,7 +25577,9 @@ void VMBuiltins_registerAll(VMContext* ctx) {
         VM_registerBuiltin(ctx, "background_get_width", builtin_background_get_width);
         VM_registerBuiltin(ctx, "background_get_texture", builtin_background_get_texture);
         VM_registerBuiltin(ctx, "background_get_height", builtin_background_get_height);
-        VM_registerBuiltin(ctx, "background_delete", builtin_sprite_delete);
+        VM_registerBuiltin(ctx, "background_delete", builtin_background_delete_gms1);
+        VM_registerBuiltin(ctx, "background_add", builtin_background_add);
+        VM_registerBuiltin(ctx, "background_assign", builtin_background_assign);
         VM_registerBuiltin(ctx, "background_exists", builtin_sprite_exists);
         VM_registerBuiltin(ctx, "background_get_name", builtin_sprite_get_name);
         VM_registerBuiltin(ctx, "background_name", builtin_sprite_get_name);
@@ -25448,6 +25651,10 @@ void VMBuiltins_registerAll(VMContext* ctx) {
 
     // Sprite info
     VM_registerBuiltin(ctx, "sprite_add", builtin_sprite_add);
+    VM_registerBuiltin(ctx, "sprite_replace", builtin_sprite_replace);
+    VM_registerBuiltin(ctx, "sprite_duplicate", builtin_sprite_duplicate);
+    VM_registerBuiltin(ctx, "sprite_merge", builtin_sprite_merge);
+    VM_registerBuiltin(ctx, "sprite_assign", builtin_sprite_assign);
     VM_registerBuiltin(ctx, "sprite_exists", builtin_sprite_exists);
     VM_registerBuiltin(ctx, "sprite_get_width", builtin_sprite_get_width);
     VM_registerBuiltin(ctx, "sprite_get_height", builtin_sprite_get_height);
