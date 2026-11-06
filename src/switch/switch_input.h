@@ -6,5 +6,6 @@
 struct Runner;
 
 bool SwitchInput_handleEvents(struct Runner* runner);
+void SwitchInput_setVibration(int device, float left, float right);
 
 #endif

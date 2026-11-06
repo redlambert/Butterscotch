@@ -8681,6 +8681,18 @@ static RValue builtin_gamepad_get_device_count(VMContext* ctx, RValue* args, int
     return RValue_makeReal((GMLReal) RunnerGamepad_getDeviceCount(runner->gamepads));
 }
 
+// gamepad_set_vibration(device, left_motor, right_motor): motor strengths from 0 to 1. Ignored where unsupported.
+static RValue builtin_gamepad_set_vibration(VMContext* ctx, RValue* args, int32_t argCount) {
+    REQUIRE_ARGC_AT_LEAST("gamepad_set_vibration", 3, RValue_makeUndefined());
+    Runner* runner = ctx->runner;
+    if (runner == NULL || runner->gamepads == NULL || runner->gamepads->setVibration == NULL) return RValue_makeUndefined();
+    int32_t device = RValue_toInt32(args[0]);
+    float left = (float) RValue_toReal(args[1]);
+    float right = (float) RValue_toReal(args[2]);
+    runner->gamepads->setVibration(device, left, right);
+    return RValue_makeUndefined();
+}
+
 static RValue builtin_gamepad_is_connected(VMContext* ctx, RValue* args, int32_t argCount) {
     Runner* runner = ctx->runner;
     if (runner == NULL || runner->gamepads == NULL) return RValue_makeBool(false);
@@ -25305,6 +25317,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     // Gamepad
     VM_registerBuiltin(ctx, "gamepad_get_device_count", builtin_gamepad_get_device_count);
     VM_registerBuiltin(ctx, "gamepad_is_connected", builtin_gamepad_is_connected);
+    VM_registerBuiltin(ctx, "gamepad_set_vibration", builtin_gamepad_set_vibration);
     VM_registerBuiltin(ctx, "gamepad_button_check", builtin_gamepad_button_check);
     VM_registerBuiltin(ctx, "gamepad_button_check_pressed", builtin_gamepad_button_check_pressed);
     VM_registerBuiltin(ctx, "gamepad_button_check_released", builtin_gamepad_button_check_released);

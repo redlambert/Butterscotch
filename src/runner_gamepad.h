@@ -51,6 +51,8 @@ typedef struct {
 typedef struct {
     GamepadSlot slots[MAX_GAMEPADS];
     int connectedCount;
+    // Set by platforms that support rumble. left/right are motor strengths from 0 to 1 (gamepad_set_vibration).
+    void (*setVibration)(int device, float left, float right);
 } RunnerGamepadState;
 
 RunnerGamepadState* RunnerGamepad_create(void);

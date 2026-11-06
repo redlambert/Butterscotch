@@ -11,8 +11,12 @@ static PadState pads[SWITCH_NPAD_COUNT];
 static bool initialized = false;
 
 static void mapLibnxToGml(GamepadSlot* slot, PadState* pad, u64 cur) {
-    if (cur & HidNpadButton_A) slot->buttonDown[0] = true;
-    if (cur & HidNpadButton_B) slot->buttonDown[1] = true;
+    // GameMaker numbers face buttons by position, not by the letter printed on them:
+    // gp_face1 = bottom, gp_face2 = right, gp_face3 = left, gp_face4 = top.
+    // On Nintendo controllers that is B, A, Y, X. Games that show Nintendo button names
+    // (AM2R's "B", "A", "Y", "X" table for gp_face1..4) rely on this.
+    if (cur & HidNpadButton_B) slot->buttonDown[0] = true;
+    if (cur & HidNpadButton_A) slot->buttonDown[1] = true;
     if (cur & HidNpadButton_Y) slot->buttonDown[2] = true;
     if (cur & HidNpadButton_X) slot->buttonDown[3] = true;
     if (cur & HidNpadButton_L) slot->buttonDown[4] = true;
@@ -60,6 +64,111 @@ static void fillGamepadSlot(GamepadSlot* slot, PadState* pad, u64 cur, bool conn
     }
 }
 
+
+// ===[ Rumble (gamepad_set_vibration) ]===
+// HD rumble through libnx. Each pad has its own vibration devices depending on how it is held:
+// handheld (two attached Joy-Cons), a Joy-Con pair, a Pro Controller, or a single Joy-Con.
+
+typedef struct {
+    HidNpadIdType id;
+    u32 style;
+    int count;
+    HidVibrationDeviceHandle handles[2];
+    float lastLeft;
+    float lastRight;
+} VibrationTarget;
+
+static VibrationTarget vibrationTargets[SWITCH_NPAD_COUNT];
+
+// Low/high frequencies close to the Switch's default rumble feel.
+#define VIBRATION_FREQ_LOW  160.0f
+#define VIBRATION_FREQ_HIGH 320.0f
+
+static bool resolveVibrationTarget(int device, HidNpadIdType* outId, u32* outStyle, int* outCount) {
+    // Pad 0 also covers handheld mode (padInitializeDefault reads No1 and Handheld).
+    if (device == 0 && (hidGetNpadStyleSet(HidNpadIdType_Handheld) & HidNpadStyleTag_NpadHandheld)) {
+        *outId = HidNpadIdType_Handheld;
+        *outStyle = HidNpadStyleTag_NpadHandheld;
+        *outCount = 2;
+        return true;
+    }
+
+    HidNpadIdType id = (HidNpadIdType) (HidNpadIdType_No1 + device);
+    u32 styles = hidGetNpadStyleSet(id);
+    *outId = id;
+    if (styles & HidNpadStyleTag_NpadFullKey) {
+        *outStyle = HidNpadStyleTag_NpadFullKey;
+        *outCount = 2;
+    } else if (styles & HidNpadStyleTag_NpadJoyDual) {
+        *outStyle = HidNpadStyleTag_NpadJoyDual;
+        *outCount = 2;
+    } else if (styles & HidNpadStyleTag_NpadJoyLeft) {
+        *outStyle = HidNpadStyleTag_NpadJoyLeft;
+        *outCount = 1;
+    } else if (styles & HidNpadStyleTag_NpadJoyRight) {
+        *outStyle = HidNpadStyleTag_NpadJoyRight;
+        *outCount = 1;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static float clampUnit(float v) {
+    if (v < 0.0f) return 0.0f;
+    if (v > 1.0f) return 1.0f;
+    return v;
+}
+
+static void setVibrationValue(HidVibrationValue* value, float amplitude) {
+    value->amp_low = amplitude;
+    value->freq_low = VIBRATION_FREQ_LOW;
+    value->amp_high = amplitude;
+    value->freq_high = VIBRATION_FREQ_HIGH;
+}
+
+void SwitchInput_setVibration(int device, float left, float right) {
+    if (device < 0 || device >= SWITCH_NPAD_COUNT) return;
+
+    left = clampUnit(left);
+    right = clampUnit(right);
+
+    HidNpadIdType id;
+    u32 style;
+    int count;
+    if (!resolveVibrationTarget(device, &id, &style, &count)) return;
+
+    VibrationTarget* target = &vibrationTargets[device];
+    bool reinit = target->count == 0 || target->id != id || target->style != style;
+    if (reinit) {
+        if (R_FAILED(hidInitializeVibrationDevices(target->handles, count, id, (HidNpadStyleTag) style))) {
+            target->count = 0;
+            return;
+        }
+        target->id = id;
+        target->style = style;
+        target->count = count;
+        target->lastLeft = -1.0f;
+        target->lastRight = -1.0f;
+    }
+
+    // Games often set the same strength every frame; only talk to the controller when it changes.
+    if (!reinit && target->lastLeft == left && target->lastRight == right) return;
+    target->lastLeft = left;
+    target->lastRight = right;
+
+    HidVibrationValue values[2];
+    if (count == 2) {
+        // Left motor -> left side (left Joy-Con / left grip), right motor -> right side.
+        setVibrationValue(&values[0], left);
+        setVibrationValue(&values[1], right);
+    } else {
+        // A single Joy-Con held sideways gets the stronger of the two.
+        setVibrationValue(&values[0], left > right ? left : right);
+    }
+    hidSendVibrationValues(target->handles, values, count);
+}
+
 bool SwitchInput_handleEvents(struct Runner* runner) {
     if (!initialized) {
         padConfigureInput(SWITCH_NPAD_COUNT, HidNpadStyleSet_NpadStandard);
@@ -67,6 +176,7 @@ bool SwitchInput_handleEvents(struct Runner* runner) {
         for (int i = 1; SWITCH_NPAD_COUNT > i; i++) {
             padInitialize(&pads[i], HidNpadIdType_No1 + i);
         }
+        runner->gamepads->setVibration = SwitchInput_setVibration;
         initialized = true;
     }
 
