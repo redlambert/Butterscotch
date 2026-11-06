@@ -10016,7 +10016,17 @@ static RValue builtin_instance_exists(VMContext* ctx, RValue* args, int32_t argC
     Runner* runner = ctx->runner;
     int32_t id = RValue_toInt32(args[0]);
     bool found = false;
-    if (id >= 0 && runner->dataWin->objt.count > (uint32_t) id) {
+    if (id == INSTANCE_SELF || id == INSTANCE_OTHER) {
+        // GameMaker's self (-1) and other (-2) keywords: true when that instance exists. AM2R's baby Septogg sets
+        // parent = -1 when its parent is gone and relies on instance_exists(parent) being true from then on; answering
+        // false re-ran its "fly away" setup every frame (sound restarting, drifting onto Samus).
+        Instance* inst = (id == INSTANCE_SELF) ? ctx->currentCallFrame->self : ctx->currentCallFrame->other;
+        found = (inst != nullptr && inst->active);
+    } else if (id == INSTANCE_ALL) {
+        repeat(arrlen(runner->instances), i) {
+            if (runner->instances[i]->active) { found = true; break; }
+        }
+    } else if (id >= 0 && runner->dataWin->objt.count > (uint32_t) id) {
         int32_t snapBase = Runner_pushInstancesOfObject(runner, id);
         int32_t snapEnd  = (int32_t) arrlen(runner->instanceSnapshots);
         for (int32_t i = snapBase; snapEnd > i; i++) {

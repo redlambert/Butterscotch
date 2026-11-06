@@ -579,7 +579,28 @@ static int32_t maPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prior
     slot->playedSamples = 0;
     slot->streamLengthSamples = 0;
 
-    if (isStream) {
+    // External sound files (not stored in data.win) are streamed too. Decoding a whole external music track up
+    // front froze the game for a second or two on the Switch every time a song started (AM2R keeps its music in
+    // external .ogg files).
+    char externalStreamPath[1024];
+    bool externalStream = false;
+    if (!isStream) {
+        bool isRegular = (sound->flags & AUDIO_ENTRY_FLAG_REGULAR) == AUDIO_ENTRY_FLAG_REGULAR;
+        bool isEmbedded = (sound->flags & AUDIO_ENTRY_FLAG_IS_EMBEDDED) != 0;
+        bool isCompressed = (sound->flags & AUDIO_ENTRY_FLAG_IS_COMPRESSED) != 0;
+        if (isRegular && !isEmbedded && !isCompressed) {
+            char* resolved = resolveExternalPath(ma, sound);
+            if (resolved != nullptr) {
+                snprintf(externalStreamPath, sizeof(externalStreamPath), "%s", resolved);
+                free(resolved);
+                streamPath = externalStreamPath;
+                externalStream = true;
+            }
+        }
+    }
+    bool streamFromFile = isStream || externalStream;
+
+    if (streamFromFile) {
         // Streaming path: open the decoder, queue a few small buffers, and let maUpdate() top them up.
         // This avoids the multi-hundred-millisecond hang of decoding a whole song into PCM on the main thread.
         int32_t wavChannels = 0;
@@ -620,7 +641,7 @@ static int32_t maPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prior
         }
         slot->streamLengthSeconds = slot->streamSampleRate > 0
             ? (float) slot->streamLengthSamples / (float) slot->streamSampleRate : 0.0f;
-        if (slot->streamLengthSeconds > 0.0f)
+        if (isStream && slot->streamLengthSeconds > 0.0f)
             ma->streams[soundIndex - AUDIO_STREAM_INDEX_BASE].lengthSeconds = slot->streamLengthSeconds;
         slot->decodeScratch = (int16_t*)safeMalloc(AL_STREAM_BUFFER_SAMPLES * slot->streamChannels * sizeof(int16_t));
 
@@ -824,7 +845,7 @@ static int32_t maPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prior
     }
     // AL_LOOPING on a streaming source only loops the currently-playing buffer, not the whole queue,
     // so streaming looping is handled by streamFillBuffer calling stb_vorbis_seek_start when the decoder runs out.
-    if (!isStream)
+    if (!streamFromFile)
         alSourcei(slot->alSource, AL_LOOPING, loop ? AL_TRUE : AL_FALSE);
 
     // Set up instance tracking
@@ -841,7 +862,7 @@ static int32_t maPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prior
     // Track unique IDs for disambiguation
     ma->nextInstanceCounter++;
 
-    if (isStream) {
+    if (streamFromFile) {
         slot->pendingStart = true;
     } else {
         alSourcePlay(slot->alSource);

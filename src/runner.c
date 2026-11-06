@@ -3887,6 +3887,20 @@ static void dispatchCollisionEvents(Runner* runner) {
 #endif
                         if (reverseEvt != nullptr)
                             executeCollisionEvent(runner, other, self, (int32_t) reverseEvt->targetObjectIndex, reverseEvt->codeId, reverseEvt->ownerObjectIndex);
+                    } else if (!hadSolid && (!self->active || !other->active) && other->objectIndex > self->objectIndex) {
+                        // The official runner fires BOTH instances' collision events when it finds a colliding pair, one
+                        // right after the other, even if the first event destroyed one of them. We normally fire the other
+                        // side from the other object's own pass instead, but a destroyed instance is skipped there, so that
+                        // event would be lost. Fire it now. AM2R needs this: a missile's collision with a Metroid destroys
+                        // the missile, and the Metroid's own collision event with the missile is what applies the damage.
+                        // Only when the other object's pass is still to come (passes run in ascending object index), so the
+                        // event can't run twice.
+                        FlattenedCollisionEvent* reverseEvt = findSymmetricCollisionEvent(runner, other, self);
+#ifdef ENABLE_VM_TRACING
+                        if (traceThisPair && reverseEvt != nullptr) logInfo("  fire other->self after destroy: owner=%d (%s) codeId=%d\n", reverseEvt->ownerObjectIndex, dataWin->objt.objects[reverseEvt->ownerObjectIndex].name, reverseEvt->codeId);
+#endif
+                        if (reverseEvt != nullptr)
+                            executeCollisionEvent(runner, other, self, (int32_t) reverseEvt->targetObjectIndex, reverseEvt->codeId, reverseEvt->ownerObjectIndex);
                     }
 
                     // Native parity for solids: collision event can alter path state, so run one
