@@ -954,6 +954,11 @@ void Runner_broadcastMessage(Runner* runner, const char* type, const char* messa
 // invokes renderer->vtable->beginFrame. Every platform main should call this instead of beginFrame directly.
 void Runner_beginFrame(Runner* runner, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH, int32_t framebufferW, int32_t framebufferH);
 void Runner_drawGUI(Runner* runner, int32_t windowW, int32_t windowH, int32_t targetW, int32_t targetH);
+// Where the application surface is (or would be) drawn in the window, keeping its aspect ratio.
+void Runner_computeAppSurfaceRect(int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH, int32_t* outX1, int32_t* outY1, int32_t* outX2, int32_t* outY2);
+// Default GUI size: when a game turns off automatic application surface drawing, it presents the frame itself
+// in window pixels, so (like the official runner) its GUI layer covers the whole window 1:1 with window pixels.
+bool Runner_getWindowPixelGuiSize(Runner* runner, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH, int32_t* outW, int32_t* outH);
 void Runner_drawPre(Runner* runner, int32_t windowW, int32_t windowH);
 void Runner_drawPost(Runner* runner, int32_t windowW, int32_t windowH);
 void Runner_computeViewDisplayScale(Runner* runner, int32_t gameW, int32_t gameH, float* outScaleX, float* outScaleY);

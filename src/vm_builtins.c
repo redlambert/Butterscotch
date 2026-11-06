@@ -13879,8 +13879,25 @@ STUB_RETURN_VALUE(display_get_width, 640.0)
 STUB_RETURN_VALUE(display_get_height, 480.0)
 #endif
 
+// Game size and window size used for app-surface placement (application_get_position, default GUI size).
+static bool getAppAndWindowSize(Runner* runner, int32_t* gameW, int32_t* gameH, int32_t* windowW, int32_t* windowH) {
+    if (runner == nullptr || runner->getWindowSize == nullptr) return false;
+    if (!runner->getWindowSize(windowW, windowH)) return false;
+    *gameW = runner->applicationWidth > 0 ? runner->applicationWidth : (int32_t) runner->dataWin->gen8.defaultWindowWidth;
+    *gameH = runner->applicationHeight > 0 ? runner->applicationHeight : (int32_t) runner->dataWin->gen8.defaultWindowHeight;
+    return true;
+}
+
+static bool resolveWindowPixelGuiSize(Runner* runner, int32_t* outW, int32_t* outH) {
+    int32_t gameW, gameH, windowW, windowH;
+    if (!getAppAndWindowSize(runner, &gameW, &gameH, &windowW, &windowH)) return false;
+    return Runner_getWindowPixelGuiSize(runner, gameW, gameH, windowW, windowH, outW, outH);
+}
+
 static int32_t resolveGuiWidth(Runner* runner) {
     if (runner->guiWidth > 0) return runner->guiWidth;
+    int32_t pixelW, pixelH;
+    if (resolveWindowPixelGuiSize(runner, &pixelW, &pixelH)) return pixelW;
     Room* room = runner->currentRoom;
     if (room != nullptr) {
         repeat(8, vi) {
@@ -13895,6 +13912,8 @@ static int32_t resolveGuiWidth(Runner* runner) {
 
 static int32_t resolveGuiHeight(Runner* runner) {
     if (runner->guiHeight > 0) return runner->guiHeight;
+    int32_t pixelW, pixelH;
+    if (resolveWindowPixelGuiSize(runner, &pixelW, &pixelH)) return pixelH;
     Room* room = runner->currentRoom;
     if (room != nullptr) {
         repeat(8, vi) {
@@ -13905,6 +13924,29 @@ static int32_t resolveGuiHeight(Runner* runner) {
         if (room->height > 0) return (int32_t) room->height;
     }
     return 240;
+}
+
+// application_get_position: [x1, y1, x2, y2] of where the application surface is drawn in the window.
+// When the game has turned off automatic drawing it places the image itself, and its GUI layer covers
+// the whole window, so the reference rect is the full window.
+static RValue builtin_application_get_position(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    int32_t x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+    int32_t gameW, gameH, windowW, windowH;
+    if (getAppAndWindowSize(ctx->runner, &gameW, &gameH, &windowW, &windowH)) {
+        if (ctx->runner->appSurfaceAutoDraw) {
+            Runner_computeAppSurfaceRect(gameW, gameH, windowW, windowH, &x1, &y1, &x2, &y2);
+        } else {
+            x2 = windowW;
+            y2 = windowH;
+        }
+    }
+
+    GMLArray* out = GMLArray_create(ctx->dataWin, 4);
+    *GMLArray_slot(out, 0) = RValue_makeReal((GMLReal) x1);
+    *GMLArray_slot(out, 1) = RValue_makeReal((GMLReal) y1);
+    *GMLArray_slot(out, 2) = RValue_makeReal((GMLReal) x2);
+    *GMLArray_slot(out, 3) = RValue_makeReal((GMLReal) y2);
+    return RValue_makeArray(out);
 }
 
 static RValue builtin_display_get_gui_width(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
@@ -25451,6 +25493,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "display_get_width", builtin_display_get_width);
     VM_registerBuiltin(ctx, "display_get_height", builtin_display_get_height);
     VM_registerBuiltin(ctx, "display_get_gui_width", builtin_display_get_gui_width);
+    VM_registerBuiltin(ctx, "application_get_position", builtin_application_get_position);
     VM_registerBuiltin(ctx, "display_get_gui_height", builtin_display_get_gui_height);
     VM_registerBuiltin(ctx, "display_set_gui_size", builtin_display_set_gui_size);
     VM_registerBuiltin(ctx, "display_set_gui_maximise", builtin_display_set_gui_maximise);

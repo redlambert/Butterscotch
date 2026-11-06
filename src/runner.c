@@ -1235,6 +1235,41 @@ static void endGuiPass(Runner* runner) {
     runner->inGuiPass = false;
 }
 
+void Runner_computeAppSurfaceRect(int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH, int32_t* outX1, int32_t* outY1, int32_t* outX2, int32_t* outY2) {
+    if (gameW <= 0 || gameH <= 0 || windowW <= 0 || windowH <= 0) {
+        *outX1 = 0;
+        *outY1 = 0;
+        *outX2 = windowW;
+        *outY2 = windowH;
+        return;
+    }
+
+    int32_t effW, effH;
+    if ((gameW * windowH) / gameH < windowW) {
+        effW = (gameW * windowH) / gameH;
+        effH = windowH;
+    } else {
+        effW = windowW;
+        effH = (gameH * windowW) / gameW;
+    }
+    *outX1 = (windowW - effW) / 2;
+    *outY1 = (windowH - effH) / 2;
+    *outX2 = *outX1 + effW;
+    *outY2 = *outY1 + effH;
+}
+
+bool Runner_getWindowPixelGuiSize(Runner* runner, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH, int32_t* outW, int32_t* outH) {
+    if (runner->guiWidth > 0 || runner->guiHeight > 0) return false;
+    if (runner->appSurfaceAutoDraw) return false;
+
+    (void) gameW;
+    (void) gameH;
+    if (windowW <= 0 || windowH <= 0) return false;
+    *outW = windowW;
+    *outH = windowH;
+    return true;
+}
+
 void Runner_drawGUI(Runner* runner, int32_t windowW, int32_t windowH, int32_t targetW, int32_t targetH) {
     rebuildDrawableCacheIfDirty(runner);
     Drawable* drawables = runner->cachedDrawables;
@@ -1242,6 +1277,11 @@ void Runner_drawGUI(Runner* runner, int32_t windowW, int32_t windowH, int32_t ta
 
     int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : targetW;
     int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : targetH;
+    int32_t pixelGuiW, pixelGuiH;
+    if (Runner_getWindowPixelGuiSize(runner, targetW, targetH, windowW, windowH, &pixelGuiW, &pixelGuiH)) {
+        guiW = pixelGuiW;
+        guiH = pixelGuiH;
+    }
     beginGuiPass(runner, guiW, guiH, windowW, windowH, RENDER_TARGET_HOST_FRAMEBUFFER);
     fireDrawSubtype(runner, drawables, drawableCount, DRAW_GUI_BEGIN);
     fireDrawSubtype(runner, drawables, drawableCount, DRAW_GUI);

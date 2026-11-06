@@ -3618,6 +3618,12 @@ VMContext* VM_create(DataWin* dataWin) {
     repeat(dataWin->func.functionCount, i) {
         const char* name = dataWin->func.functions[i].name;
         BuiltinFunc builtin = VM_findBuiltin(ctx, name);
+        // Before GMS 2.3 a game could only define a script with this name if no such built-in existed in its
+        // GameMaker version, so the game's script wins over our (newer) built-in. Example: AM2R ships its own
+        // string_split script, which returns a string, while the GMS 2.3+ built-in returns an array.
+        if (builtin != nullptr && !DataWin_isVersionAtLeast(dataWin, 2, 3, 0, 0) && shgeti(ctx->codeIndexByName, (char*) name) >= 0) {
+            builtin = nullptr;
+        }
         ctx->funcCallCache[i].builtin = (void*) builtin;
         if (builtin != nullptr) {
             ctx->funcCallCache[i].scriptCodeIndex = -1;
