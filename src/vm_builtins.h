@@ -286,6 +286,9 @@ struct Renderer;
 void VMBuiltins_resetD3D(struct Renderer* renderer);
 bool VMBuiltins_isD3DActive(const struct Renderer* renderer);
 void VMBuiltins_applyD3DDefaultView(struct Renderer* renderer, float x, float y, float width, float height, float angle);
+struct Runner;
+// Applies a display_reset() requested during the frame: frees every surface except the application surface.
+void VMBuiltins_applyPendingDisplayReset(struct Runner* runner);
 int16_t VMBuiltins_resolveBuiltinVarId(const char* name);
 bool VMBuiltins_isInstanceScopedBuiltinVar(int16_t builtinVarId);
 // Asserts at startup that the internal builtin-var lookup table is strictly sorted by strcmp order (required for bsearch) and has no duplicates.

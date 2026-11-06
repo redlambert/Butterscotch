@@ -723,6 +723,7 @@ struct Runner {
     int32_t pendingRoom;  // -1 = none
     bool gameStartFired;
     int frameCount;
+    bool pendingDisplayReset; // set by display_reset(), applied after the next frame is presented
     uint32_t nextInstanceId;
     RunnerKeyboardState* keyboard;
     RunnerMouseState* mouse;

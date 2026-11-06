@@ -31,6 +31,7 @@
 
 #include "runner_keyboard.h"
 #include "runner.h"
+#include "vm_builtins.h"
 #include "input_recording.h"
 #include "debug_overlay.h"
 #include "default_font/default_font.h"
@@ -1468,8 +1469,10 @@ int loop(CommandLineArgs args, const char *argv0) {
 
             // Only present a new frame when we actually rendered one. This includes the first paused frame so the
             // pause overlay can be presented once, and all later paused frames stay frozen without re-swapping.
-            if (runner->pendingRoom == -1 && shouldRender)
+            if (runner->pendingRoom == -1 && shouldRender) {
                 platformSwapBuffers();
+                VMBuiltins_applyPendingDisplayReset(runner);
+            }
             if (shouldStep) {
                 Runner_handlePendingRoomChange(runner);
             }

@@ -13231,6 +13231,31 @@ static RValue builtin_surface_free(VMContext* ctx, RValue* args, MAYBE_UNUSED in
     return RValue_makeUndefined();
 }
 
+// display_reset: on the official runner this resets the graphics device once the
+// current frame is presented, which destroys every surface except the application
+// surface. Games rely on that to rebuild surfaces at new sizes (AM2R recreates its
+// widescreen surface this way), so mark the reset here and apply it after the swap.
+#define DISPLAY_RESET_MAX_SURFACE_ID 4096
+static RValue builtin_display_reset(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    if (runner == nullptr) return RValue_makeUndefined();
+
+    runner->pendingDisplayReset = true;
+    return RValue_makeUndefined();
+}
+
+void VMBuiltins_applyPendingDisplayReset(Runner* runner) {
+    if (runner == nullptr || !runner->pendingDisplayReset) return;
+    runner->pendingDisplayReset = false;
+    if (runner->renderer == nullptr) return;
+
+    for (int32_t surfaceId = 0; surfaceId < DISPLAY_RESET_MAX_SURFACE_ID; surfaceId++) {
+        if (surfaceId == runner->applicationSurfaceId) continue;
+        if (!Renderer_surfaceExists(runner->renderer, surfaceId)) continue;
+        runner->renderer->vtable->surfaceFree(runner->renderer, surfaceId);
+    }
+}
+
 static RValue builtin_draw_surface(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
 
     int32_t surfaceId = (int32_t) RValue_toReal(args[0]);
@@ -25365,6 +25390,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     // Surface
     VM_registerBuiltin(ctx, "surface_create", builtin_surface_create);
     VM_registerBuiltin(ctx, "surface_free", builtin_surface_free);
+    VM_registerBuiltin(ctx, "display_reset", builtin_display_reset);
     VM_registerBuiltin(ctx, "surface_set_target", builtin_surface_set_target);
     VM_registerBuiltin(ctx, "surface_reset_target", builtin_surface_reset_target);
     VM_registerBuiltin(ctx, "surface_get_target", builtin_surface_get_target);
