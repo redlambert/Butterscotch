@@ -1554,14 +1554,16 @@ static void drawTiled(
             if (i == 0 || wy < visMinY) visMinY = wy;
             if (i == 0 || wy > visMaxY) visMaxY = wy;
         }
+        // GameMaker tiles across the whole view being drawn, not just the room: a view can extend past the room
+        // edge (AM2R's widescreen view is 53px wider on each side), and those strips must be covered too or
+        // stale pixels from previous frames smear through. So tile over exactly the visible area, aligned to the grid.
         if (tileX) {
-            // Snap start forward by whole tiles so the tile containing visMinX is kept
-            if (visMinX > startX) startX += floorf((visMinX - startX) / tileW) * tileW;
-            if (visMaxX < endX) endX = visMaxX;
+            startX = gridX + floorf((visMinX - gridX) / tileW) * tileW;
+            endX = visMaxX;
         }
         if (tileY) {
-            if (visMinY > startY) startY += floorf((visMinY - startY) / tileH) * tileH;
-            if (visMaxY < endY) endY = visMaxY;
+            startY = gridY + floorf((visMinY - gridY) / tileH) * tileH;
+            endY = visMaxY;
         }
     }
     if (startX >= endX || startY >= endY) return;

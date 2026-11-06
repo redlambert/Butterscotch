@@ -221,91 +221,154 @@ static bool overlayWriteFileBinary(FileSystem* fs, const char* relativePath, con
 }
 
 // ===[ Streaming Binary I/O ]===
-// Handle wraps the FILE* plus the resolved on-disk path
+// GML file_bin_* works one byte at a time (read a byte, seek back, write a byte, seek on...). Doing that straight on a
+// FILE* turns every seek into a flush plus a buffer refill, i.e. real storage I/O per byte. On the Switch's SD card that
+// made AM2R's save encryption (crypt) take 1-2 seconds. So the whole file is kept in memory while it's open, and written
+// back in one go on close (or never, if it was only read).
 
 typedef struct {
-    FILE* fp;
-    char* fullPath; // already-resolved absolute path used at open time
+    char* fullPath;   // already-resolved path used at open time
+    uint8_t* data;
+    int32_t size;     // logical file size
+    int32_t capacity;
+    int32_t pos;
+    bool writable;
+    bool dirty;       // contents changed (or the file was created/truncated) and must be written on close
 } OverlayBinaryHandle;
 
-static OverlayBinaryHandle* overlayBinaryHandleNew(FILE* fp, char* fullPathTaken) {
-    OverlayBinaryHandle* h = (OverlayBinaryHandle *)safeMalloc(sizeof(OverlayBinaryHandle));
-    h->fp = fp;
+static OverlayBinaryHandle* overlayBinaryHandleNew(char* fullPathTaken, bool writable) {
+    OverlayBinaryHandle* h = (OverlayBinaryHandle *)safeCalloc(1, sizeof(OverlayBinaryHandle));
     h->fullPath = fullPathTaken; // takes ownership
+    h->writable = writable;
     return h;
+}
+
+// Loads the whole file into the handle. Returns false if it can't be opened.
+static bool overlayBinaryLoad(OverlayBinaryHandle* h) {
+    FILE* f = fopen(h->fullPath, "rb");
+    if (f == nullptr) return false;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size > 0) {
+        h->data = (uint8_t *)safeMalloc((size_t) size);
+        h->size = (int32_t) fread(h->data, 1, (size_t) size, f);
+        h->capacity = (int32_t) size;
+    }
+    fclose(f);
+    return true;
+}
+
+static bool overlayBinaryFlush(OverlayBinaryHandle* h) {
+    FILE* f = fopen(h->fullPath, "wb");
+    if (f == nullptr) return false;
+    if (h->size > 0) fwrite(h->data, 1, (size_t) h->size, f);
+    fclose(f);
+    h->dirty = false;
+    return true;
 }
 
 static void* overlayBinaryOpen(FileSystem* fs, const char* relativePath, int32_t mode) {
     OverlayFileSystem* ofs = (OverlayFileSystem*) fs;
     if (mode == GML_FILE_BIN_READ) {
-        char* path = resolveForRead(ofs, relativePath);
-        FILE* f = fopen(path, "rb");
-        if (f == nullptr) { free(path); return nullptr; }
-        return overlayBinaryHandleNew(f, path);
+        OverlayBinaryHandle* h = overlayBinaryHandleNew(resolveForRead(ofs, relativePath), false);
+        if (!overlayBinaryLoad(h)) {
+            free(h->fullPath);
+            free(h);
+            return nullptr;
+        }
+        return h;
     }
     if (mode == GML_FILE_BIN_WRITE) {
         char* path = resolveForWrite(ofs, relativePath);
         ensureParentDir(path);
-        FILE* f = fopen(path, "wb");
-        if (f == nullptr) { free(path); return nullptr; }
-        return overlayBinaryHandleNew(f, path);
+        OverlayBinaryHandle* h = overlayBinaryHandleNew(path, true);
+        // Create/truncate right away like fopen("wb") would, so the file exists while it's open.
+        if (!overlayBinaryFlush(h)) {
+            free(h->fullPath);
+            free(h);
+            return nullptr;
+        }
+        return h;
     }
     // GML_FILE_BIN_READWRITE: preserve existing contents
-    char* readPath = resolveForRead(ofs, relativePath);
-    FILE* f = fopen(readPath, "r+b");
-    if (f != nullptr) return overlayBinaryHandleNew(f, readPath);
-    free(readPath);
-    char* writePath = resolveForWrite(ofs, relativePath);
-    ensureParentDir(writePath);
-    f = fopen(writePath, "w+b");
-    if (f == nullptr) { free(writePath); return nullptr; }
-    return overlayBinaryHandleNew(f, writePath);
+    OverlayBinaryHandle* h = overlayBinaryHandleNew(resolveForRead(ofs, relativePath), true);
+    if (overlayBinaryLoad(h)) return h;
+    free(h->fullPath);
+    h->fullPath = resolveForWrite(ofs, relativePath);
+    ensureParentDir(h->fullPath);
+    if (!overlayBinaryFlush(h)) {
+        free(h->fullPath);
+        free(h);
+        return nullptr;
+    }
+    return h;
 }
 
 static void overlayBinaryClose(MAYBE_UNUSED FileSystem* fs, void* handle) {
     if (handle == nullptr) return;
     OverlayBinaryHandle* h = (OverlayBinaryHandle*) handle;
-    if (h->fp != nullptr) fclose(h->fp);
+    if (h->writable && h->dirty) overlayBinaryFlush(h);
+    free(h->data);
     free(h->fullPath);
     free(h);
 }
 
 static int32_t overlayBinaryRead(MAYBE_UNUSED FileSystem* fs, void* handle, void* dst, int32_t n) {
     if (handle == nullptr || 0 >= n) return 0;
-    return (int32_t) fread(dst, 1, (size_t) n, ((OverlayBinaryHandle*) handle)->fp);
+    OverlayBinaryHandle* h = (OverlayBinaryHandle*) handle;
+    if (h->pos >= h->size) return 0;
+    int32_t available = h->size - h->pos;
+    int32_t count = n < available ? n : available;
+    memcpy(dst, h->data + h->pos, (size_t) count);
+    h->pos += count;
+    return count;
 }
 
 static int32_t overlayBinaryWrite(MAYBE_UNUSED FileSystem* fs, void* handle, const void* src, int32_t n) {
     if (handle == nullptr || 0 >= n) return 0;
-    return (int32_t) fwrite(src, 1, (size_t) n, ((OverlayBinaryHandle*) handle)->fp);
+    OverlayBinaryHandle* h = (OverlayBinaryHandle*) handle;
+    if (!h->writable) return 0;
+    int32_t end = h->pos + n;
+    if (end > h->capacity) {
+        int32_t newCapacity = h->capacity > 0 ? h->capacity : 256;
+        while (newCapacity < end) newCapacity *= 2;
+        h->data = (uint8_t *)safeRealloc(h->data, (size_t) newCapacity);
+        h->capacity = newCapacity;
+    }
+    // Writing past the end after a seek leaves a gap; fill it with zeros like a real file would.
+    if (h->pos > h->size) memset(h->data + h->size, 0, (size_t) (h->pos - h->size));
+    memcpy(h->data + h->pos, src, (size_t) n);
+    h->pos = end;
+    if (end > h->size) h->size = end;
+    h->dirty = true;
+    return n;
 }
 
 static int32_t overlayBinaryTell(MAYBE_UNUSED FileSystem* fs, void* handle) {
     if (handle == nullptr) return 0;
-    return (int32_t) ftell(((OverlayBinaryHandle*) handle)->fp);
+    return ((OverlayBinaryHandle*) handle)->pos;
 }
 
 static bool overlayBinarySeek(MAYBE_UNUSED FileSystem* fs, void* handle, int32_t pos) {
-    if (handle == nullptr) return false;
-    return fseek(((OverlayBinaryHandle*) handle)->fp, pos, SEEK_SET) == 0;
+    if (handle == nullptr || 0 > pos) return false;
+    ((OverlayBinaryHandle*) handle)->pos = pos;
+    return true;
 }
 
 static int32_t overlayBinarySize(MAYBE_UNUSED FileSystem* fs, void* handle) {
     if (handle == nullptr) return 0;
-    FILE* f = ((OverlayBinaryHandle*) handle)->fp;
-    long saved = ftell(f);
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, saved, SEEK_SET);
-    return (int32_t) size;
+    return ((OverlayBinaryHandle*) handle)->size;
 }
 
 static void overlayBinaryRewrite(MAYBE_UNUSED FileSystem* fs, void* handle) {
     if (handle == nullptr) return;
     OverlayBinaryHandle* h = (OverlayBinaryHandle*) handle;
-    if (h->fp != nullptr) fclose(h->fp);
-    // "wb+" truncates the existing file (or creates it if it vanished since open) and gives back read+write
-    h->fp = fopen(h->fullPath, "wb+");
+    // Truncate to empty, keeping read+write access
+    h->size = 0;
+    h->pos = 0;
+    h->writable = true;
+    h->dirty = true;
 }
 
 static bool overlayDirectoryExists(FileSystem* fs, const char* relativePath) {
