@@ -83,6 +83,25 @@ void SpatialGrid_removeInstance(SpatialGrid* grid, Instance* instance) {
     }
 }
 
+// Adds the instance to every cell its bounding box covers. collisionCells must not hold entries from a previous grid.
+static void insertIntoCells(Runner* runner, SpatialGrid* grid, Instance* instance) {
+    InstanceBBox bbox = Collision_computeBBox(runner, instance);
+
+    arrsetlen(instance->collisionCells, 0);
+
+    if (!bbox.valid)
+        return;
+
+    SpatialGridRange range = SpatialGrid_computeCellRange(grid, bbox.left, bbox.top, bbox.right, bbox.bottom);
+
+    for (int32_t gx = range.minGridX; range.maxGridX >= gx; gx++) {
+        for (int32_t gy = range.minGridY; range.maxGridY >= gy; gy++) {
+            arrput(grid->grid[SpatialGrid_cellIndex(grid, gx, gy)], instance);
+            arrput(instance->collisionCells, SpatialGrid_packGridCoordinates(gx, gy));
+        }
+    }
+}
+
 void SpatialGrid_syncGrid(Runner* runner, SpatialGrid* grid) {
     bool requiresResync = arrlen(grid->dirtyInstances);
     if (!requiresResync) return;
@@ -95,9 +114,12 @@ void SpatialGrid_syncGrid(Runner* runner, SpatialGrid* grid) {
         int32_t instanceId = grid->dirtyInstances[i];
         Instance* instance = hmget(runner->instancesById, instanceId);
 
-        // We do not care about removed/inactive/destroyed instances, because they would've been already been removed from the grid on the "SpatialGrid_markInstanceAsDirty" call
+        // We do not care about removed/destroyed instances, because they would've been already been removed from the grid on the "SpatialGrid_markInstanceAsDirty" call
         // We also do not care if the spatial grid is not dirty
-        if (instance == nullptr || !instance->active || instance->destroyed || !instance->spatialGridDirty)
+        // Deactivated instances ARE kept up to date: activation only flips a flag, so a deactivated instance must still
+        // be in the right cells when it comes back (every grid query already skips inactive instances). Skipping them
+        // here used to leave them flagged dirty but out of the queue, so they never got back into the grid.
+        if (instance == nullptr || instance->destroyed || !instance->spatialGridDirty)
             continue;
 
         instance->spatialGridDirty = false;
@@ -105,21 +127,7 @@ void SpatialGrid_syncGrid(Runner* runner, SpatialGrid* grid) {
         // Remove from old cells
         SpatialGrid_removeInstance(grid, instance);
 
-        InstanceBBox bbox = Collision_computeBBox(runner, instance);
-
-        arrsetlen(instance->collisionCells, 0);
-
-        if (!bbox.valid)
-            continue;
-
-        SpatialGridRange range = SpatialGrid_computeCellRange(grid, bbox.left, bbox.top, bbox.right, bbox.bottom);
-
-        for (int32_t gx = range.minGridX; range.maxGridX >= gx; gx++) {
-            for (int32_t gy = range.minGridY; range.maxGridY >= gy; gy++) {
-                arrput(grid->grid[SpatialGrid_cellIndex(grid, gx, gy)], instance);
-                arrput(instance->collisionCells, SpatialGrid_packGridCoordinates(gx, gy));
-            }
-        }
+        insertIntoCells(runner, grid, instance);
 
         // And that's it for now!
     }
@@ -132,7 +140,7 @@ void SpatialGrid_markInstanceAsDirty(SpatialGrid* grid, Instance* dirtyInstance)
     if (dirtyInstance->objectIndex == STRUCT_OBJECT_INDEX)
         return;
 
-    if (!dirtyInstance->active || dirtyInstance->destroyed) {
+    if (dirtyInstance->destroyed) {
         // Destroyed instances are updated instantly because, if we didn't, we would need to track the ID + all grids that the instance is in
         // Guard against stale entries left behind by room transitions or earlier clears of collisionCells.
         SpatialGrid_removeInstance(grid, dirtyInstance);
