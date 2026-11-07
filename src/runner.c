@@ -4192,7 +4192,10 @@ static void persistRoomState(Runner* runner, int32_t roomIndex) {
         Instance* inst = runner->instances[i];
         if (inst->persistent) {
             arrput(keptInstances, inst);
-        } else if (inst->active) {
+        } else if (!inst->destroyed) {
+            // Deactivated instances belong to the room too (the native runner keeps them with the room).
+            // AM2R deactivates every off-screen wall and enemy, so dropping them here made those walls vanish
+            // after the item screen or the map, and Samus could fall through floors that were drawn but not solid.
             arrput(state->instances, inst);
         } else {
             hmdel(runner->instancesById, inst->instanceId);

@@ -1305,6 +1305,12 @@ int loop(CommandLineArgs args, const char *argv0) {
             int32_t fbWidth, fbHeight;
             platformGetWindowSize(&fbWidth, &fbHeight);
 
+            // A room change is pending, so instance Draw events are blocked for the rest of this frame. The native runner
+            // skips drawing such a frame entirely. Rendering it anyway would overwrite view surfaces with only the room's
+            // backgrounds and tiles, and games that copy a view surface on the next room's Create (AM2R's item screen)
+            // would show that half-drawn image.
+            if (runner->pendingRoom != -1) shouldRender = false;
+
             if (shouldRender) {
                 // Clear the default framebuffer (window background) to black
 #ifdef ENABLE_SW_RENDERER
