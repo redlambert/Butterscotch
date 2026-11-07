@@ -1734,6 +1734,25 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
 
     // === Normal room initialization (first visit, or non-persistent room) ===
 
+    // tile_delete/tile_add/etc. edit room->tiles directly, so put back the room's original tiles.
+    // Without this, a tile removed on an earlier visit (like the graphic of a broken block) stays gone until the app restarts.
+    if (!room->originalTilesSaved) {
+        room->originalTileCount = room->tileCount;
+        if (room->tileCount > 0) {
+            room->originalTiles = (RoomTile *)safeMalloc(room->tileCount * sizeof(RoomTile));
+            memcpy(room->originalTiles, room->tiles, room->tileCount * sizeof(RoomTile));
+        }
+        room->originalTilesSaved = true;
+    } else {
+        free(room->tiles);
+        room->tiles = nullptr;
+        room->tileCount = room->originalTileCount;
+        if (room->originalTileCount > 0) {
+            room->tiles = (RoomTile *)safeMalloc(room->originalTileCount * sizeof(RoomTile));
+            memcpy(room->tiles, room->originalTiles, room->originalTileCount * sizeof(RoomTile));
+        }
+    }
+
     // Initialize the views and their default cameras from scratch.
     repeat(MAX_VIEWS, vi) {
         RoomView* roomView = &room->views[vi];

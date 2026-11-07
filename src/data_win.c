@@ -3620,6 +3620,10 @@ void DataWin_freeRoomPayload(Room* room) {
     free(room->tiles);
     room->tiles = nullptr;
     room->tileCount = 0;
+    free(room->originalTiles);
+    room->originalTiles = nullptr;
+    room->originalTileCount = 0;
+    room->originalTilesSaved = false;
     if (room->layerCount != 0 && room->layers != nullptr) {
         repeat(room->layerCount, j) {
             RoomLayer* layer = &room->layers[j];

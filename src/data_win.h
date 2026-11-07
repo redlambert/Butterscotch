@@ -735,6 +735,12 @@ typedef struct {
     RoomTile* tiles;
     uint32_t layerCount;
     RoomLayer* layers;
+
+    // Copy of the room's tiles as they were before the game first changed them (tile_delete, tile_add, ...).
+    // Non-persistent rooms are restored from this every time they are entered, like the native runner rebuilding them.
+    bool originalTilesSaved;
+    uint32_t originalTileCount;
+    RoomTile* originalTiles;
 } Room;
 
 typedef struct {
